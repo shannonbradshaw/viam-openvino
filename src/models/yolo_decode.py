@@ -153,6 +153,71 @@ def decode(output: np.ndarray, version: str, conf_threshold: float) -> Tuple[np.
     return boxes, scores, class_ids.astype(np.int64)
 
 
+def decode_seg(
+    output: np.ndarray, num_masks: int, conf_threshold: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Decode a YOLO v8/v11 segmentation output ``[1, 4+C+M, N]`` into (boxes xyxy [N,4], scores [N],
+    class_ids [N], mask coefficients [N,M]) in letterboxed-image coordinates."""
+    out = np.asarray(output, dtype=np.float32)
+    if out.ndim == 3:
+        if out.shape[0] != 1:
+            raise ValueError(f"only batch size 1 is supported, got output shape {list(out.shape)}")
+        out = out[0]
+    if out.ndim != 2:
+        raise ValueError(f"unexpected YOLO segmentation output rank {out.ndim} with shape {list(output.shape)}")
+    preds = out.T  # [N, 4+C+M]
+    num_classes = preds.shape[1] - 4 - num_masks
+    if num_classes < 1:
+        raise ValueError(
+            f"segmentation output shape {list(output.shape)} has no room for class scores with {num_masks} mask coefficients"
+        )
+    class_scores = preds[:, 4:4 + num_classes]
+    scores = class_scores.max(axis=1)
+    class_ids = class_scores.argmax(axis=1)
+    keep = scores >= conf_threshold
+    preds, scores, class_ids = preds[keep], scores[keep], class_ids[keep]
+    cx, cy, w, h = preds[:, 0], preds[:, 1], preds[:, 2], preds[:, 3]
+    boxes = np.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], axis=1)
+    return boxes, scores, class_ids.astype(np.int64), preds[:, 4 + num_classes:]
+
+
+def masks_to_image(
+    coeffs: np.ndarray, protos: np.ndarray, boxes: np.ndarray, info: LetterboxInfo, threshold: float = 0.5
+) -> np.ndarray:
+    """Build per-detection masks at the original image size.
+
+    ``coeffs`` [K, M] and ``protos`` [M, mh, mw] (or [1, M, mh, mw]) are the YOLO mask coefficients and
+    prototypes; ``boxes`` [K, 4] are xyxy in original-image pixels. The prototype grid covers the
+    letterboxed canvas, so the padding is cropped off before resizing to the original image. Each mask is
+    also clipped to its box, as Ultralytics does. Returns a bool array [K, orig_h, orig_w]."""
+    protos = np.asarray(protos, dtype=np.float32)
+    if protos.ndim == 4:
+        protos = protos[0]
+    num_masks, mh, mw = protos.shape
+    k = len(coeffs)
+    out = np.zeros((k, info.orig_h, info.orig_w), dtype=bool)
+    if k == 0:
+        return out
+    logits = np.asarray(coeffs, dtype=np.float32) @ protos.reshape(num_masks, -1)
+    probs = (1.0 / (1.0 + np.exp(-logits))).reshape(k, mh, mw)
+    # Original pixel x maps to prototype coordinate (x * scale + pad_x) * mw / out_w (likewise for y).
+    sx, sy = mw / info.out_w, mh / info.out_h
+    for i in range(k):
+        bx1, by1, bx2, by2 = (int(round(v)) for v in boxes[i])
+        bx1, by1 = max(bx1, 0), max(by1, 0)
+        bx2, by2 = min(bx2, info.orig_w), min(by2, info.orig_h)
+        if bx2 <= bx1 or by2 <= by1:
+            continue
+        # Resample only the part of the prototype grid under the box, straight to the box's size in original pixels.
+        src = (
+            (bx1 * info.scale + info.pad_x) * sx, (by1 * info.scale + info.pad_y) * sy,
+            (bx2 * info.scale + info.pad_x) * sx, (by2 * info.scale + info.pad_y) * sy,
+        )
+        crop = Image.fromarray(probs[i], mode="F").resize((bx2 - bx1, by2 - by1), Image.BILINEAR, box=src)
+        out[i, by1:by2, bx1:bx2] = np.asarray(crop) > threshold
+    return out
+
+
 def nms(boxes: np.ndarray, scores: np.ndarray, class_ids: np.ndarray, iou_threshold: float, max_detections: int) -> np.ndarray:
     """Class-aware greedy NMS. Returns indices to keep, ordered by descending score."""
     if len(boxes) == 0:

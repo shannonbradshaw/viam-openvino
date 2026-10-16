@@ -23,6 +23,12 @@
     },
     {
       "api": "rdk:service:vision",
+      "model": "erh:openvino:yolo-seg",
+      "markdown_link": "README.md#erhopenvinoyolo-seg",
+      "short_description": "YOLO v8/v11 instance segmentation; mask-based 3D object point clouds from an RGBD camera."
+    },
+    {
+      "api": "rdk:service:vision",
       "model": "erh:openvino:rf-detr",
       "markdown_link": "README.md#erhopenvinorf-detr",
       "short_description": "RF-DETR (Roboflow) detection decoding on top of any mlmodel service."

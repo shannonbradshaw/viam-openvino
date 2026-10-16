@@ -15,6 +15,7 @@ from viam.module.module import Module  # noqa: E402
 from models.detr_vision import RfDetrVision  # noqa: E402, F401
 from models.diagnostics import OpenVINODiagnostics  # noqa: E402, F401
 from models.openvino_mlmodel import OpenVINOMLModel  # noqa: E402, F401
+from models.yolo_seg_vision import YoloSegVision  # noqa: E402, F401
 from models.yolo_vision import YoloVision  # noqa: E402, F401
 
 

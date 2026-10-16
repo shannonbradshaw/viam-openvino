@@ -11,6 +11,7 @@ This module provides these models:
 |---|---|---|
 | [`erh:openvino:mlmodel`](#viamopenvinomlmodel) | `rdk:service:mlmodel` | Runs ONNX, OpenVINO IR, TFLite, TensorFlow and PaddlePaddle models. Works with the stock `vision:mlmodel` service and anything else that speaks the `mlmodel` API. |
 | [`erh:openvino:yolo`](#viamopenvinoyolo) | `rdk:service:vision` | Decodes YOLO v5 / v8 / v11 detection outputs (letterbox, decode, NMS) on top of any `mlmodel` service, not only this one. |
+| [`erh:openvino:yolo-seg`](#erhopenvinoyolo-seg) | `rdk:service:vision` | YOLO v8 / v11 instance segmentation; with an RGBD camera, mask-based 3D object point clouds via `GetObjectPointClouds`. |
 | [`erh:openvino:rf-detr`](#erhopenvinorf-detr) | `rdk:service:vision` | Decodes [RF-DETR](https://github.com/roboflow/rf-detr) detection outputs on top of any `mlmodel` service. |
 | [`erh:openvino:diagnostics`](#viamopenvinodiagnostics) | `rdk:service:generic` | `list_devices`, `get_compiled_properties`, `benchmark` and `stats` via `DoCommand`. |
 
@@ -212,6 +213,59 @@ any implementation of that API, not only `erh:openvino:mlmodel`.
 `DoCommand {"command": "model_info"}` reports the input name and size, output names and shapes, label count, and the
 YOLO version in use. The mlmodel diagnostics commands (`list_devices`, `get_compiled_properties`, `benchmark`, `stats`)
 are also accepted and forwarded to the configured `mlmodel_name` when it is a `erh:openvino:mlmodel` in this module.
+
+## `erh:openvino:yolo-seg`
+
+A vision service for YOLO v8 / v11 instance segmentation models (for example `yolo11n-seg`). It returns detections
+like `erh:openvino:yolo`, and with an RGBD camera it implements `GetObjectPointClouds`: each instance's **mask**, not
+its bounding box, is projected through the depth image. Touching objects at the same depth, and background inside a
+box, therefore stay out of each other's point clouds, which matters for grasp planning and for obstacles in the motion
+service's world state.
+
+```json
+{
+  "name": "segmenter",
+  "api": "rdk:service:vision",
+  "model": "erh:openvino:yolo-seg",
+  "attributes": {
+    "mlmodel_name": "ov-seg",
+    "camera_name": "realsense",
+    "confidence_threshold": 0.3,
+    "depth_threshold_mm": 150
+  }
+}
+```
+
+The camera must return a color image and a depth image (`image/vnd.viam.dep`) **aligned to the color frame**, plus
+intrinsic parameters. On a RealSense, configure `"sensors": ["color", "depth"]` and `"align_color_depth": true`. A
+depth image whose size differs from the color image is rejected with an error that says so.
+
+### Attributes
+
+All `erh:openvino:yolo` attributes apply (`yolo_version` may be `v8`, `v11` or `auto`). In addition:
+
+| Attribute | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `mask_threshold` | float | `0.5` | no | Mask probability above which a pixel belongs to the instance. |
+| `depth_threshold_mm` | float | `0` | no | Keep only points within this distance of the instance's median depth. Removes background that bleeds in at the mask edge. `0` disables. |
+| `max_depth_mm` | float | `0` | no | Drop points farther than this. `0` disables. |
+| `min_points` | int | `50` | no | Instances with fewer valid depth points are not returned. |
+| `mask_erode_px` | int | `2` | no | Shrink each mask by this many pixels before projecting; depth and color disagree most at object edges. |
+
+### Behavior
+
+1. Run the model on the color image and decode boxes, scores and mask coefficients from `[1, 4 + C + M, N]`; run NMS.
+2. Combine coefficients with the `[1, M, H/4, W/4]` prototypes, crop the letterbox padding, resize to the original
+   image, threshold, and clip each mask to its box.
+3. For `GetObjectPointClouds`: erode each mask, deproject masked pixels with valid depth using the camera
+   intrinsics, apply the depth filters, and return one `PointCloudObject` per instance: a binary PCD with color
+   (meters, as the RDK expects) and an axis-aligned box geometry labeled with the class name (millimeters).
+
+Point clouds and geometries are in the **camera's frame** (`reference_frame` is the camera name; +Z out of the lens).
+The motion service places them in the world through the frame system, so give the camera a frame.
+
+`GetDetections`, `GetDetectionsFromCamera`, `GetObjectPointClouds` and `CaptureAllFromCamera` (image, detections and
+objects) are implemented. Classification calls return an unimplemented error.
 
 ## `erh:openvino:rf-detr`
 
